@@ -121,7 +121,39 @@ impl<'a> Formatter<'a> {
                     }
                 })
             }
-            Rule::type_stmt | Rule::let_rec_stmt => {
+            Rule::type_stmt => {
+                let rendered = csts
+                    .iter()
+                    .map(|now_cst| (now_cst.rule, self.to_string_cst(text, now_cst, depth)))
+                    .collect::<Vec<_>>();
+                let cnt = rendered
+                    .iter()
+                    .filter(|(rule, _)| *rule == Rule::type_inner)
+                    .count();
+                let break_and = cnt > 2
+                    || rendered
+                        .iter()
+                        .any(|(rule, s)| *rule == Rule::type_inner && s.contains('\n'));
+                rendered
+                    .into_iter()
+                    .fold(String::new(), |current, (rule, s)| {
+                        if current.is_empty() {
+                            return s;
+                        }
+                        match rule {
+                            Rule::type_inner => {
+                                if break_and {
+                                    current + &newline + RESERVED_WORD.and + " " + &s
+                                } else {
+                                    current + " and " + &s
+                                }
+                            }
+                            Rule::comments => current + &s,
+                            _ => unreachable!(),
+                        }
+                    })
+            }
+            Rule::let_rec_stmt => {
                 let mut cnt = 0;
                 let output = csts.iter().fold(String::new(), |current, now_cst| {
                     let s = self.to_string_cst(text, now_cst, depth);
@@ -132,14 +164,6 @@ impl<'a> Formatter<'a> {
                         return s;
                     }
                     match now_cst.rule {
-                        Rule::type_inner => {
-                            cnt += 1;
-                            if cnt > 1 {
-                                current + " and " + &s
-                            } else {
-                                current + &s
-                            }
-                        }
                         Rule::let_rec_inner => {
                             cnt += 1;
                             if cnt > 2 {
@@ -396,25 +420,61 @@ impl<'a> Formatter<'a> {
                 }
                 output
             }
-            Rule::type_inner => csts.iter().fold(String::new(), |current, now_cst| {
-                let s = self.to_string_cst(text, now_cst, depth);
-                let s = if now_cst.rule == Rule::type_name {
-                    s + " = "
-                } else {
-                    s
-                };
-                if current.is_empty() {
-                    return s;
-                }
-                match now_cst.rule {
-                    Rule::type_param => current + &s,
-                    // not end cst
-                    Rule::type_name => current + " " + &s,
-                    Rule::type_variant => current + " | " + &s,
-                    Rule::type_expr => current + &s,
-                    _ => current + &s,
-                }
-            }),
+            Rule::type_inner => {
+                let rendered = csts
+                    .iter()
+                    .map(|now_cst| (now_cst.rule, self.to_string_cst(text, now_cst, depth)))
+                    .collect::<Vec<_>>();
+                let multiline_variant = text
+                    .get(cst.span.start..cst.span.end)
+                    .unwrap()
+                    .trim_end()
+                    .contains('\n')
+                    || rendered
+                        .iter()
+                        .any(|(rule, s)| *rule == Rule::type_variant && s.contains('\n'));
+                let variant_indent = indent_space(self.option.tab_size as usize, depth + 1);
+                let mut has_variant = false;
+                rendered
+                    .into_iter()
+                    .fold(String::new(), |mut current, (rule, s)| {
+                        match rule {
+                            Rule::type_param => {
+                                current += &s;
+                            }
+                            Rule::type_name => {
+                                if current.is_empty() {
+                                    current += &(s + " = ");
+                                } else {
+                                    current += " ";
+                                    current += &(s + " = ");
+                                }
+                            }
+                            Rule::type_variant => {
+                                if multiline_variant {
+                                    current = current.trim_end().to_string();
+                                    current += "\n";
+                                    current += &variant_indent;
+                                    current += "| ";
+                                    current += &s;
+                                } else if has_variant {
+                                    current += " | ";
+                                    current += &s;
+                                } else {
+                                    current += &s;
+                                }
+                                has_variant = true;
+                            }
+                            Rule::type_expr => {
+                                current += &s;
+                            }
+                            _ => {
+                                current += &s;
+                            }
+                        }
+                        current
+                    })
+            }
             Rule::type_variant => {
                 let output = csts.iter().fold(String::new(), |current, now_cst| {
                     let s = self.to_string_cst(text, now_cst, depth);
