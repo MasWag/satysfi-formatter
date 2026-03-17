@@ -42,7 +42,6 @@ pub fn format(input: &str, option: FormattingOptions) -> String {
     visualize_csttext_tree(&csttext);
 
     let depth = 0;
-    
 
     formatter.format(input, &csttext.cst, depth)
 }

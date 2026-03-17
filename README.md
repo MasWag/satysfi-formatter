@@ -13,7 +13,7 @@ cargo install --force --git https://github.com/usagrada/satysfi-formatter.git --
 ## usage
 
 ```bash
-satysfi-fmt $input -o $output
+satysfi-fmt $input --line-width 120 -o $output
 ```
 
 @monaqa さんの [satysfi-parser](https://github.com/monaqa/satysfi-parser) を元にformatを行っている
