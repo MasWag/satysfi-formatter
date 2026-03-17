@@ -44,6 +44,41 @@ impl<'a> Formatter<'a> {
         output
     }
 
+    fn is_structured_match_arm_expr(&self, cst: &Cst) -> bool {
+        use satysfi_parser::Rule;
+
+        let cst = if cst.rule == Rule::expr {
+            cst.inner.first().unwrap_or(cst)
+        } else {
+            cst
+        };
+
+        matches!(cst.rule, Rule::bind_stmt | Rule::lambda | Rule::match_expr)
+    }
+
+    fn should_break_assignment_rhs(&self, rendered: &str) -> bool {
+        rendered.starts_with("let")
+            || (!rendered.starts_with("'<") && !rendered.starts_with('{'))
+                && rendered.contains('\n')
+    }
+
+    fn format_assignment_rhs(
+        &self,
+        text: &str,
+        expr_cst: &Cst,
+        rendered: &str,
+        current: String,
+        binding_depth: usize,
+    ) -> String {
+        if self.should_break_assignment_rhs(rendered) {
+            let indent = indent_space(self.option.tab_size as usize, binding_depth + 1);
+            let s = self.to_string_cst(text, expr_cst, binding_depth + 1);
+            current + " =\n" + &indent + s.trim_start()
+        } else {
+            current + " = " + rendered
+        }
+    }
+
     /// cst の inner の要素を結合して文字列に変換する関数
     fn to_string_cst_inner(&self, text: &str, cst: &Cst, depth: usize) -> String {
         /*
@@ -229,21 +264,8 @@ impl<'a> Formatter<'a> {
                                     // 1つインデントを深くする
                                     let s = self.to_string_cst(text, now_cst, depth + 1);
                                     current + &s
-                                }
-                                // ブロック定義は例外
-                                else if s.starts_with("let")
-                                    || (!s.starts_with("'<") && !s.starts_with('{'))
-                                        && s.contains('\n')
-                                {
-                                    // 1つインデントを深くする
-                                    let s = self.to_string_cst(text, now_cst, depth + 1);
-                                    current
-                                        + " ="
-                                        + &newline
-                                        + &indent_space(self.option.tab_size as usize, 1)
-                                        + s.trim_start()
                                 } else {
-                                    current + " = " + &s
+                                    self.format_assignment_rhs(text, now_cst, &s, current, depth)
                                 }
                             }
                             Rule::comments => {
@@ -455,7 +477,13 @@ impl<'a> Formatter<'a> {
                                 current + " " + &s
                             }
                         }
-                        Rule::expr => current + " = " + &s,
+                        Rule::expr => self.format_assignment_rhs(
+                            text,
+                            now_cst,
+                            &s,
+                            current,
+                            depth.saturating_sub(1),
+                        ),
                         _ => current + &s,
                     }
                 })
@@ -467,7 +495,13 @@ impl<'a> Formatter<'a> {
                 }
                 match now_cst.rule {
                     Rule::arg => current + " " + &s,
-                    Rule::expr => current + " = " + &s,
+                    Rule::expr => self.format_assignment_rhs(
+                        text,
+                        now_cst,
+                        &s,
+                        current,
+                        depth.saturating_sub(1),
+                    ),
                     _ => unreachable!(),
                 }
             }),
@@ -480,7 +514,18 @@ impl<'a> Formatter<'a> {
                 match now_cst.rule {
                     Rule::pat_as => current + " " + &s,
                     Rule::match_guard => current + " " + &s,
-                    Rule::expr => current + " -> " + &s,
+                    Rule::expr => {
+                        if self.is_structured_match_arm_expr(now_cst) {
+                            let s = self.to_string_cst(text, now_cst, depth + 1);
+                            current
+                                + " ->"
+                                + &newline
+                                + &indent_space(self.option.tab_size as usize, 1)
+                                + s.trim_start()
+                        } else {
+                            current + " -> " + &s
+                        }
+                    }
                     _ => current + &s,
                 }
             }),
@@ -689,7 +734,12 @@ impl<'a> Formatter<'a> {
                                     if index == 0 {
                                         current + &s + " " + RESERVED_WORD.in_stmt + &newline
                                     } else {
-                                        current + &newline + &s + " " + RESERVED_WORD.in_stmt + &newline
+                                        current
+                                            + &newline
+                                            + &s
+                                            + " "
+                                            + RESERVED_WORD.in_stmt
+                                            + &newline
                                     }
                                 }
                                 Rule::expr => {

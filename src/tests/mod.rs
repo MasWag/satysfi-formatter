@@ -6,6 +6,7 @@ mod common;
 mod ctrl_stmt;
 mod horizontal_single;
 mod let_block;
+mod match_expr;
 mod math;
 mod module;
 mod space;

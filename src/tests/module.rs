@@ -109,3 +109,79 @@ end
 "#;
     test_tmpl(&input, expect);
 }
+
+#[test]
+fn let_rec_multiline_match_rhs_breaks_after_equals() {
+    let text = r#"@stage: persistent
+
+module M: sig
+    val resolve-points: 'a -> 'b -> 'c
+end = struct
+    let-rec resolve-points origin sources = match sources with | [] -> [] | source :: rest -> resolve-point origin source :: resolve-points origin rest
+end"#;
+
+    let expect = r#"@stage: persistent
+
+module M: sig
+    val resolve-points: 'a -> 'b -> 'c
+end = struct
+    let-rec resolve-points origin sources =
+        match sources with
+            | [] -> []
+            | source :: rest -> resolve-point origin source :: resolve-points origin rest
+end
+"#;
+
+    test_tmpl(text, expect);
+}
+
+#[test]
+fn let_rec_matcharm_multiline_rhs_breaks_after_equals() {
+    let text = r#"@stage: persistent
+
+module M: sig
+    val resolve: 'a -> 'b
+end = struct
+    let-rec resolve
+      | (None) = None
+      | (Some(value)) = match value with | None -> value | Some(rest) -> resolve rest
+end"#;
+
+    let expect = r#"@stage: persistent
+
+module M: sig
+    val resolve: 'a -> 'b
+end = struct
+    let-rec resolve
+        | (None) = None
+        | (Some(value)) =
+            match value with
+                | None -> value
+                | Some(rest) -> resolve rest
+end
+"#;
+
+    test_tmpl(text, expect);
+}
+
+#[test]
+fn let_rec_single_line_rhs_stays_inline() {
+    let text = r#"@stage: persistent
+
+module M: sig
+    val resolve: 'a -> 'b
+end = struct
+    let-rec resolve origin = origin
+end"#;
+
+    let expect = r#"@stage: persistent
+
+module M: sig
+    val resolve: 'a -> 'b
+end = struct
+    let-rec resolve origin = origin
+end
+"#;
+
+    test_tmpl(text, expect);
+}
