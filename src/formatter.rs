@@ -1,8 +1,11 @@
 use crate::comment::{get_comments, to_comment_string, Comment};
 use crate::reserved_words::*;
-use lspower::lsp::FormattingOptions;
-use satysfi_parser::{Cst, CstText};
+use lspower::lsp::{FormattingOptions, FormattingProperty};
+use satysfi_parser::{Cst, CstText, Rule};
 use std::collections::VecDeque;
+use unicode_width::UnicodeWidthStr;
+
+const DEFAULT_LINE_WIDTH: usize = 120;
 
 pub struct Formatter<'a> {
     pub text: &'a str,
@@ -44,9 +47,95 @@ impl<'a> Formatter<'a> {
         output
     }
 
-    fn is_structured_match_arm_expr(&self, cst: &Cst) -> bool {
-        use satysfi_parser::Rule;
+    fn line_width(&self) -> usize {
+        match self.option.properties.get("lineWidth") {
+            Some(FormattingProperty::Number(value)) if *value > 0 => *value as usize,
+            _ => DEFAULT_LINE_WIDTH,
+        }
+    }
 
+    fn max_line_width(&self, text: &str) -> usize {
+        text.lines().map(UnicodeWidthStr::width).max().unwrap_or(0)
+    }
+
+    fn line_fits(&self, depth: usize, extra_prefix_width: usize, text: &str) -> bool {
+        let used_width = self.option.tab_size as usize * depth + extra_prefix_width;
+        used_width + self.max_line_width(text) <= self.line_width()
+    }
+
+    fn append_indented_rendered(&self, current: String, rendered: &str, depth: usize) -> String {
+        let prefix = format!(
+            "\n{}",
+            indent_space(self.option.tab_size as usize, depth + 1)
+        );
+        if current.ends_with(&prefix) {
+            current + rendered.trim_start()
+        } else {
+            current + &prefix + rendered.trim_start()
+        }
+    }
+
+    fn allows_inline_multiline_expr(&self, rendered: &str) -> bool {
+        rendered.starts_with("'<")
+            || rendered.starts_with('{')
+            || rendered.starts_with('[')
+            || rendered.starts_with("(|")
+    }
+
+    fn join_rendered_expr_with_wrap(
+        &self,
+        text: &str,
+        expr_cst: &Cst,
+        current: String,
+        depth: usize,
+        inline_sep: &str,
+        break_sep: &str,
+        extra_prefix_width: usize,
+        inline_expr: &str,
+        force_wrap: bool,
+    ) -> String {
+        let force_wrap = force_wrap
+            || current.contains('\n')
+            || (inline_expr.contains('\n') && !self.allows_inline_multiline_expr(inline_expr));
+        if !force_wrap
+            && self.line_fits(
+                depth,
+                extra_prefix_width,
+                &(current.clone() + inline_sep + inline_expr),
+            )
+        {
+            current + inline_sep + inline_expr
+        } else {
+            let rendered_expr = self.to_string_cst(text, expr_cst, depth + 1);
+            self.append_indented_rendered(current + break_sep, &rendered_expr, depth)
+        }
+    }
+
+    fn join_expr_with_wrap(
+        &self,
+        text: &str,
+        expr_cst: &Cst,
+        current: String,
+        depth: usize,
+        inline_sep: &str,
+        break_sep: &str,
+        extra_prefix_width: usize,
+    ) -> String {
+        let inline_expr = self.to_string_cst(text, expr_cst, depth);
+        self.join_rendered_expr_with_wrap(
+            text,
+            expr_cst,
+            current,
+            depth,
+            inline_sep,
+            break_sep,
+            extra_prefix_width,
+            &inline_expr,
+            false,
+        )
+    }
+
+    fn is_structured_match_arm_expr(&self, cst: &Cst) -> bool {
         let cst = if cst.rule == Rule::expr {
             cst.inner.first().unwrap_or(cst)
         } else {
@@ -54,6 +143,28 @@ impl<'a> Formatter<'a> {
         };
 
         matches!(cst.rule, Rule::bind_stmt | Rule::lambda | Rule::match_expr)
+    }
+
+    fn format_match_arm_rhs(
+        &self,
+        text: &str,
+        expr_cst: &Cst,
+        current: String,
+        depth: usize,
+        extra_prefix_width: usize,
+    ) -> String {
+        let inline_expr = self.to_string_cst(text, expr_cst, depth);
+        self.join_rendered_expr_with_wrap(
+            text,
+            expr_cst,
+            current,
+            depth,
+            " -> ",
+            " ->",
+            extra_prefix_width,
+            &inline_expr,
+            self.is_structured_match_arm_expr(expr_cst),
+        )
     }
 
     fn should_break_assignment_rhs(&self, rendered: &str) -> bool {
@@ -69,16 +180,43 @@ impl<'a> Formatter<'a> {
         rendered: &str,
         current: String,
         binding_depth: usize,
+        extra_prefix_width: usize,
     ) -> String {
-        if self.should_break_assignment_rhs(rendered) {
-            let indent = indent_space(self.option.tab_size as usize, binding_depth + 1);
-            let s = self.to_string_cst(text, expr_cst, binding_depth + 1);
-            current + " =\n" + &indent + s.trim_start()
-        } else {
-            current + " = " + rendered
-        }
+        self.join_rendered_expr_with_wrap(
+            text,
+            expr_cst,
+            current,
+            binding_depth,
+            " = ",
+            " =",
+            extra_prefix_width,
+            rendered,
+            self.should_break_assignment_rhs(rendered),
+        )
     }
 
+    fn application_flat_output(
+        &self,
+        text: &str,
+        csts: &[Cst],
+        depth: usize,
+    ) -> (String, bool, bool) {
+        let first_text = self.to_string_cst(text, &csts[0], depth);
+        let insert_space = first_text != "document";
+        let mut force_multiline = first_text.contains('\n');
+        let mut output = first_text;
+
+        for cst in csts.iter().skip(1) {
+            let s = self.to_string_cst(text, cst, depth);
+            force_multiline |= cst.rule == Rule::comments;
+            if insert_space {
+                output += " ";
+            }
+            output += &s;
+        }
+
+        (output, force_multiline, insert_space)
+    }
     /// cst の inner の要素を結合して文字列に変換する関数
     fn to_string_cst_inner(&self, text: &str, cst: &Cst, depth: usize) -> String {
         /*
@@ -88,7 +226,6 @@ impl<'a> Formatter<'a> {
             inner: [Cst]
         }
         */
-        use satysfi_parser::Rule;
         let csts = cst.inner.clone();
         // 関数内で改行するときはこれを使用する
         let indent = indent_space(self.option.tab_size as usize, depth);
@@ -130,32 +267,26 @@ impl<'a> Formatter<'a> {
                 }
                 output
             }
-            Rule::let_mutable_stmt => {
-                csts.iter().fold(String::new(), |current, now_cst| {
-                    let s = self.to_string_cst(text, now_cst, depth);
-                    if current.is_empty() {
-                        return s;
-                    }
-                    match now_cst.rule {
-                        Rule::var => current + " " + &s,
-                        Rule::expr => {
-                            if s.contains('\n') {
-                                // 1つインデントを深くする
-                                let s = self.to_string_cst(text, now_cst, depth + 1);
-                                current
-                                    + " <-"
-                                    + &newline
-                                    + &indent_space(self.option.tab_size as usize, 1)
-                                    + s.trim_start()
-                            } else {
-                                current + " <- " + &s
-                            }
-                        }
-                        Rule::comments => current + &s,
-                        _ => unreachable!(),
-                    }
-                })
-            }
+            Rule::let_mutable_stmt => csts.iter().fold(String::new(), |current, now_cst| {
+                let s = self.to_string_cst(text, now_cst, depth);
+                if current.is_empty() {
+                    return s;
+                }
+                match now_cst.rule {
+                    Rule::var => current + " " + &s,
+                    Rule::expr => self.join_expr_with_wrap(
+                        text,
+                        now_cst,
+                        current,
+                        depth,
+                        " <- ",
+                        " <-",
+                        UnicodeWidthStr::width(RESERVED_WORD.let_mutable) + 1,
+                    ),
+                    Rule::comments => current + &s,
+                    _ => unreachable!(),
+                }
+            }),
             Rule::type_stmt => {
                 let rendered = csts
                     .iter()
@@ -277,10 +408,7 @@ impl<'a> Formatter<'a> {
                             Rule::constraint => {
                                 // 1つインデントを深くする
                                 let s = self.to_string_cst(text, now_cst, depth + 1);
-                                current
-                                    + &newline
-                                    + &indent_space(self.option.tab_size as usize, 1)
-                                    + &s
+                                self.append_indented_rendered(current, &s, depth)
                             }
                             Rule::expr => {
                                 // 直前がコメント
@@ -289,18 +417,36 @@ impl<'a> Formatter<'a> {
                                     let s = self.to_string_cst(text, now_cst, depth + 1);
                                     current + &s
                                 } else {
-                                    self.format_assignment_rhs(text, now_cst, &s, current, depth)
+                                    let extra_prefix_width = match cst.rule {
+                                        Rule::let_block_stmt_ctx | Rule::let_block_stmt_noctx => {
+                                            UnicodeWidthStr::width(RESERVED_WORD.let_block) + 1
+                                        }
+                                        Rule::let_inline_stmt_ctx | Rule::let_inline_stmt_noctx => {
+                                            UnicodeWidthStr::width(RESERVED_WORD.let_inline) + 1
+                                        }
+                                        Rule::let_math_stmt => {
+                                            UnicodeWidthStr::width(RESERVED_WORD.let_math) + 1
+                                        }
+                                        Rule::let_stmt => {
+                                            UnicodeWidthStr::width(RESERVED_WORD.let_stmt) + 1
+                                        }
+                                        _ => 0,
+                                    };
+                                    self.format_assignment_rhs(
+                                        text,
+                                        now_cst,
+                                        &s,
+                                        current,
+                                        depth,
+                                        extra_prefix_width,
+                                    )
                                 }
                             }
                             Rule::comments => {
                                 if index + 1 < csts.len() && csts[index + 1].rule == Rule::expr {
                                     // 1つインデントを深くする
                                     let s = self.to_string_cst(text, now_cst, depth + 1);
-                                    current
-                                        + " ="
-                                        + &newline
-                                        + &indent_space(self.option.tab_size as usize, 1)
-                                        + &s
+                                    self.append_indented_rendered(current + " =", &s, depth)
                                 } else {
                                     current + &s
                                 }
@@ -543,6 +689,7 @@ impl<'a> Formatter<'a> {
                             &s,
                             current,
                             depth.saturating_sub(1),
+                            UnicodeWidthStr::width(RESERVED_WORD.let_rec) + 1,
                         ),
                         _ => current + &s,
                     }
@@ -561,6 +708,7 @@ impl<'a> Formatter<'a> {
                         &s,
                         current,
                         depth.saturating_sub(1),
+                        UnicodeWidthStr::width("| "),
                     ),
                     _ => unreachable!(),
                 }
@@ -574,18 +722,13 @@ impl<'a> Formatter<'a> {
                 match now_cst.rule {
                     Rule::pat_as => current + " " + &s,
                     Rule::match_guard => current + " " + &s,
-                    Rule::expr => {
-                        if self.is_structured_match_arm_expr(now_cst) {
-                            let s = self.to_string_cst(text, now_cst, depth + 1);
-                            current
-                                + " ->"
-                                + &newline
-                                + &indent_space(self.option.tab_size as usize, 1)
-                                + s.trim_start()
-                        } else {
-                            current + " -> " + &s
-                        }
-                    }
+                    Rule::expr => self.format_match_arm_rhs(
+                        text,
+                        now_cst,
+                        current,
+                        depth,
+                        UnicodeWidthStr::width("| "),
+                    ),
                     _ => current + &s,
                 }
             }),
@@ -697,7 +840,8 @@ impl<'a> Formatter<'a> {
                     match now_cst.rule {
                         Rule::pattern => current + " " + &s,
                         Rule::comments => current + &s,
-                        _ => current + " -> " + &s,
+                        _ => self
+                            .join_expr_with_wrap(text, now_cst, current, depth, " -> ", " ->", 0),
                     }
                 }),
             Rule::record_unit => csts.iter().fold(String::new(), |current, now_cst| {
@@ -707,7 +851,9 @@ impl<'a> Formatter<'a> {
                 }
                 match now_cst.rule {
                     Rule::var_ptn => current + " " + &s,
-                    Rule::expr => current + " = " + &s,
+                    Rule::expr => {
+                        self.join_expr_with_wrap(text, now_cst, current, depth, " = ", " =", 0)
+                    }
                     Rule::comments => current + &s,
                     _ => unreachable!(),
                 }
@@ -757,7 +903,9 @@ impl<'a> Formatter<'a> {
                     | Rule::unary_operator_expr
                     | Rule::application
                     | Rule::unary
-                    | Rule::variant_constructor => current + " <- " + &s,
+                    | Rule::variant_constructor => {
+                        self.join_expr_with_wrap(text, now_cst, current, depth, " <- ", " <-", 0)
+                    }
                     Rule::comments => current + &s,
                     _ => unreachable!(),
                 }
@@ -766,15 +914,23 @@ impl<'a> Formatter<'a> {
                 if csts.is_empty() {
                     return "".to_string();
                 }
-                let first_text = self.to_string_cst(text, &csts[0], depth);
-                let insert_space = first_text != "document";
-                let mut output = first_text;
+                let (flat_output, force_multiline, insert_space) =
+                    self.application_flat_output(text, &csts, depth);
+                let arg_count = csts.len().saturating_sub(1);
+                let aggressive_wrap =
+                    arg_count >= 3 && self.max_line_width(&flat_output) > self.line_width() / 2;
+                if !insert_space
+                    || (!force_multiline
+                        && !aggressive_wrap
+                        && self.line_fits(depth, 0, &flat_output))
+                {
+                    return flat_output;
+                }
+
+                let mut output = self.to_string_cst(text, &csts[0], depth);
                 for cst in csts.iter().skip(1) {
-                    let s = self.to_string_cst(text, cst, depth);
-                    if insert_space {
-                        output += " ";
-                    }
-                    output += &s;
+                    let rendered = self.to_string_cst(text, cst, depth + 1);
+                    output = self.append_indented_rendered(output, &rendered, depth);
                 }
                 output
             }
