@@ -10,6 +10,7 @@ mod match_expr;
 mod math;
 mod module;
 mod space;
+mod type_stmt;
 
 fn test_tmpl(input: &str, expect: &str) {
     let option = FormattingOptions {
