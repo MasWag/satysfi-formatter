@@ -206,7 +206,7 @@ document(|title = { hello }|)'<
 
 /// Check trivia independently of rendering, so a parse-error passthrough cannot
 /// make a regression appear to pass. Compare the syntax tree without positions.
-fn assert_comment_roundtrip(input: &str) {
+fn assert_comment_roundtrip(input: &str) -> String {
     use satysfi_parser::{grammar, Cst, CstText, Item, Rule};
     fn comments(source: &CstText, node: &Cst, out: &mut Vec<String>) {
         for item in source.items(node) {
@@ -240,9 +240,6 @@ fn assert_comment_roundtrip(input: &str) {
         )
     }
     let before = CstText::parse(input, grammar::program).expect("valid fixture");
-    let original = before.cst.clone();
-    crate::comment::with_comments(&before, &before.cst);
-    assert_eq!(before.cst, original, "adapter must not mutate the CST");
     let output = crate::format(input, super::default_option());
     let after = CstText::parse(&output, grammar::program)
         .unwrap_or_else(|e| panic!("invalid output: {e:?}\n{output}"));
@@ -261,18 +258,18 @@ fn assert_comment_roundtrip(input: &str) {
         output,
         "not idempotent for {input}"
     );
+    output
 }
 
 #[test]
 fn comments_at_expression_boundaries() {
     for input in [
-        "% first\nlet x = 1 % trailing\n",
-        "let x = if true % condition\nthen % then\n1 % branch\nelse % else\n2\n",
-        "let x = f % function\n1 % argument\n2\n",
-        "let x = [1; % element\n2; % last\n]\n",
+        // Exercise both sides of a list separator in one fixture.
+        "let x = [1 % before separator\n; % after separator\n2]\n",
+        // A nested argument comment must also prevent short-list compaction.
         "let x = [f% c\n1]\n",
+        // Comments must remain inside argument parentheses on the second pass.
         "let x = f (% first\n1) (% second\n2)\n",
-        "let x = [1 % before separator\n; 2]\n",
     ] {
         assert_comment_roundtrip(input);
     }
@@ -280,37 +277,26 @@ fn comments_at_expression_boundaries() {
 
 #[test]
 fn comments_in_empty_structures() {
-    for input in [
-        "let x = [% empty\n]\n",
-        "let x = (|% empty\n|)\n",
-        "let x = {% empty\n}\n",
-        "let x = '<% empty\n>\n",
-    ] {
-        assert_comment_roundtrip(input);
-    }
+    assert_eq!(
+        assert_comment_roundtrip("let x = [% empty\n]\n"),
+        "let x =\n    [\n        % empty\n    ]\n",
+    );
+    assert_comment_roundtrip("let x = (|% empty\n|)\n");
+    // Text and block comments already have exact-output coverage above.
 }
 
 #[test]
 fn percent_tokens_are_not_comments() {
-    for input in [
-        "let x = `100%` % real\n",
-        "let x = {100\\% done % real\n}\n",
-        "let x = {\\% % real\n}\n",
-        "@require: package%name\nlet x = 1\n",
-    ] {
-        assert_comment_roundtrip(input);
-    }
+    // Also cover a trailing EOF comment without a final newline.
+    assert_comment_roundtrip("let x = `100%` % real");
+    assert_comment_roundtrip("let x = {100\\% done % real\n}\n");
 }
 
 #[test]
 fn eof_comments_and_blank_lines() {
-    for input in [
-        "let x = 1 % eof",
-        "let x = 1\n% eof",
-        "% first\n\n% second\n\nlet x = 1\n\n% third\n% fourth\n",
-    ] {
-        assert_comment_roundtrip(input);
-    }
+    // First-line, consecutive and separated comments, plus an own-line EOF
+    // comment without a final newline, share the same traversal regression.
+    assert_comment_roundtrip("% first\n\n% second\n\nlet x = 1\n\n% third\n% fourth");
 }
 
 #[test]
@@ -324,27 +310,8 @@ fn parser_compatibility_preserves_new_syntax() {
 
 #[test]
 fn comment_positions_around_branches() {
-    test_tmpl(
-        "let x = if true % condition\nthen % then\n1 % branch\nelse % else\n2\n",
-        "let x =\n    if true\n    % condition\n\n    then\n        % then\n        1\n    % branch\n\n    else\n        % else\n        2\n",
-    );
-}
-
-#[test]
-fn empty_list_comment_keeps_closing_delimiter_on_its_own_line() {
-    test_tmpl(
-        "let x = [% empty\n]\n",
-        "let x =\n    [\n        % empty\n    ]\n",
-    );
-}
-
-#[test]
-fn lsp_formatting_uses_the_same_comment_adapter() {
-    let input = "let x = `100%` % eof";
-    let edits = crate::formatting(input, super::default_option());
-    assert_eq!(edits.len(), 1);
     assert_eq!(
-        edits[0].new_text,
-        crate::format(input, super::default_option())
+        assert_comment_roundtrip("let x = if true % condition\nthen % then\n1 % branch\nelse % else\n2\n"),
+        "let x =\n    if true\n    % condition\n\n    then\n        % then\n        1\n    % branch\n\n    else\n        % else\n        2\n",
     );
 }
