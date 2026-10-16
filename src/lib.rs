@@ -35,7 +35,7 @@ pub fn format(input: &str, option: FormattingOptions) -> String {
         return input.to_string();
     }
     let csttext = csttext.unwrap();
-    let csttext = csttext_insert_comments(csttext);
+    let formatting_cst = with_comments(&csttext, &csttext.cst);
     let formatter = Formatter::new(&csttext, option);
 
     #[cfg(debug_assertions)]
@@ -43,7 +43,7 @@ pub fn format(input: &str, option: FormattingOptions) -> String {
 
     let depth = 0;
 
-    formatter.format(input, &csttext.cst, depth)
+    formatter.format(input, &formatting_cst, depth)
 }
 
 pub fn formatting(input: &str, option: FormattingOptions) -> Vec<TextEdit> {
@@ -59,9 +59,9 @@ pub fn formatting(input: &str, option: FormattingOptions) -> Vec<TextEdit> {
         return Vec::new();
     }
     let csttext = csttext.unwrap();
-    let csttext = csttext_insert_comments(csttext);
+    let formatting_cst = with_comments(&csttext, &csttext.cst);
     let formatter = Formatter::new(&csttext, option);
-    let output = formatter.format(input, &csttext.cst, 0);
+    let output = formatter.format(input, &formatting_cst, 0);
     let mut edits = Vec::new();
     edits.push(TextEdit {
         range: lspower::lsp::Range {
