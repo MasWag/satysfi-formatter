@@ -1,8 +1,7 @@
-use crate::comment::{get_comments, to_comment_string, Comment};
+use crate::comment::{contains_comment, to_comment_string};
 use crate::reserved_words::*;
 use lspower::lsp::{FormattingOptions, FormattingProperty};
 use satysfi_parser::{Cst, CstText, Rule};
-use std::collections::VecDeque;
 use unicode_width::UnicodeWidthStr;
 
 const DEFAULT_LINE_WIDTH: usize = 120;
@@ -10,7 +9,6 @@ const DEFAULT_LINE_WIDTH: usize = 120;
 pub struct Formatter<'a> {
     pub text: &'a str,
     pub lines: &'a Vec<usize>,
-    pub comments: VecDeque<Comment>,
     pub depth: usize,
     pub output: String,
     option: FormattingOptions,
@@ -18,11 +16,9 @@ pub struct Formatter<'a> {
 
 impl<'a> Formatter<'a> {
     pub fn new(csttext: &'a CstText, option: FormattingOptions) -> Self {
-        let comments = get_comments(csttext);
         Self {
             text: &csttext.text,
             lines: &csttext.lines,
-            comments,
             depth: 0,
             output: String::new(),
             option,
@@ -806,6 +802,19 @@ impl<'a> Formatter<'a> {
 
                 format!("{} {output}", RESERVED_WORD.while_stmt, output = output)
             }
+            // Parentheses belong to the unary node, not just its expression.
+            // Keep trivia inside them so reparsing does not move it to arguments.
+            Rule::unary
+                if text[cst.span.start..cst.span.end].starts_with('(')
+                    && csts.iter().any(|child| child.rule == Rule::comments) =>
+            {
+                let inner = csts
+                    .iter()
+                    .map(|child| self.to_string_cst(text, child, depth))
+                    .collect::<Vec<_>>()
+                    .join(&newline);
+                format!("({newline}{}{newline})", inner.trim_end())
+            }
             Rule::unary => csts.iter().fold(String::new(), |current, now_cst| {
                 let s = self.to_string_cst(text, now_cst, depth);
                 let s = if now_cst.rule == Rule::bin_operator {
@@ -1331,6 +1340,14 @@ impl<'a> Formatter<'a> {
         // self_text は元の文字列をそのまま返したいときに使用
         match cst.rule {
             Rule::comments => to_comment_string(self_text) + &end_indent,
+            // Newly supported parser syntax: preserve its source verbatim until
+            // dedicated formatting rules exist (including any contained trivia).
+            Rule::sequential_expr
+            | Rule::path
+            | Rule::path_line
+            | Rule::path_curve
+            | Rule::path_line_cycle
+            | Rule::path_curve_cycle => self_text,
             // header
             // stage の次は必ず改行する
             Rule::stage => "@stage: ".to_string() + &self_text + "\n\n",
@@ -1445,7 +1462,7 @@ impl<'a> Formatter<'a> {
                 let trimed_self_text: String = self_text.split(char::is_whitespace).collect();
                 if output.is_empty() {
                     "[]".to_string()
-                } else if trimed_self_text.len() < 15 {
+                } else if trimed_self_text.len() < 15 && !contains_comment(cst) {
                     // list の文字の長さが十分に短い easy tableの [l;c;r;] など
                     let inner = output
                         .split('\n')
@@ -1460,7 +1477,7 @@ impl<'a> Formatter<'a> {
                 }
             }
             Rule::record | Rule::type_record => {
-                if cst.inner.len() > 1 {
+                if cst.inner.len() > 1 || cst.inner.iter().any(|c| c.rule == Rule::comments) {
                     // 2 つ以上のときは改行
                     format!("(|{start_indent}{output}{end_indent}|)")
                 } else {
